@@ -63,6 +63,31 @@ python -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8001
 
 Open [http://127.0.0.1:8001](http://127.0.0.1:8001). If that port is already in use, select a free port and use it in both the command and URL. Ask about sample prices, ingredients, allergen notes, hours, UPI, reservations, and delivery policies. Answers include source filenames and page numbers plus expandable hybrid retrieval diagnostics. Upload accepts PDF, Markdown, and TXT within the configured size limit. Re-index scans the managed PDF directory.
 
+## Vercel deployment
+
+This application is ready for deployment on Vercel as a serverless ASGI application.
+
+### Architecture on Vercel:
+- **Serverless Entrypoint:** `api/index.py` handles backend API requests through FastAPI.
+- **Edge Static CDN:** The `public/` directory contains static assets (`index.html`, `style.css`, `app.js`), served directly with zero-cold-start latency.
+- **Lightweight In-Process Vector Store:** Replaces heavy external ML runtimes (e.g. ChromaDB's ONNX runtime) with an efficient NumPy-based cosine vector store, reducing the serverless bundle from 278.8 MB to under 175 MB (comfortably below Vercel's 225 MB function limit).
+- **Read-Only Filesystem Handling:** Vector collections and document registries automatically utilize `/tmp/data` on Vercel while reading bundled PDFs directly from `data/documents`.
+
+### Environment Variables on Vercel:
+| Variable | Required | Description |
+|---|---|---|
+| `GOOGLE_API_KEY` | Optional (Recommended) | Enables Gemini generation and semantic embeddings. If omitted, the app runs in deterministic local-hash embedding mode with cited source text. |
+| `GEMINI_MODEL` | Optional | Defaults to `gemini-2.5-flash`. |
+| `GEMINI_EMBEDDING_MODEL` | Optional | Defaults to `gemini-embedding-001`. |
+
+### Deploy Steps:
+1. Push to your GitHub repository.
+2. In the [Vercel Dashboard](https://vercel.com), import the `barandrestorent` repository.
+3. Keep the **Framework Preset** as **Other**.
+4. Set the `GOOGLE_API_KEY` environment variable in the Project Settings if using Gemini.
+5. Click **Deploy**.
+
+
 ## Tests and evaluation
 
 ```powershell

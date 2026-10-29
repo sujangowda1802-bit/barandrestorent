@@ -7,8 +7,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-import chromadb
-from chromadb.config import Settings as ChromaSettings
+try:
+    import chromadb
+    from chromadb.config import Settings as ChromaSettings
+    HAS_CHROMADB = True
+except ImportError:
+    chromadb = None
+    ChromaSettings = None
+    HAS_CHROMADB = False
+
 from rank_bm25 import BM25Okapi
 
 from app.config import settings
@@ -330,89 +337,228 @@ class EmbeddingService:
 class VectorStore:
     COLLECTION_NAME = "green_fork_chunks"
 
+    class _CollectionShim:
+        def __init__(self, store: "VectorStore"):
+            self._store = store
+
+        @property
+        def metadata(self) -> dict[str, Any]:
+            return {"embedding_identity": self._store.embedder.identity, "hnsw:space": "cosine"}
+
+        def count(self) -> int:
+            return self._store.count()
+
     def __init__(self, path: Optional[Path] = None, embedder: Optional[EmbeddingService] = None):
         self.embedder = embedder or embedding_service
         self.path = path or settings.chroma_dir
-        self.path.mkdir(parents=True, exist_ok=True)
-        self.client = chromadb.PersistentClient(
-            path=str(self.path),
-            settings=ChromaSettings(anonymized_telemetry=False),
-        )
-        self.collection = self.client.get_or_create_collection(
-            name=self.COLLECTION_NAME,
-            metadata={"hnsw:space": "cosine", "embedding_identity": self.embedder.identity},
-        )
-        identity = (self.collection.metadata or {}).get("embedding_identity")
-        if identity and identity != self.embedder.identity:
-            raise RAGError(
-                "The saved Chroma collection uses a different embedding configuration. "
-                "Do not mix embeddings; configure the original model or use a new data/chroma directory "
-                "and re-index all PDFs."
+        try:
+            self.path.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        self._use_chroma = bool(settings.use_chromadb and HAS_CHROMADB)
+        self.meta_path = self.path / "store_meta.json"
+        self.data_path = self.path / "vectors.json"
+        self.chunks: dict[str, dict[str, Any]] = {}
+
+        if self._use_chroma:
+            self.client = chromadb.PersistentClient(
+                path=str(self.path),
+                settings=ChromaSettings(anonymized_telemetry=False),
             )
+            self.collection = self.client.get_or_create_collection(
+                name=self.COLLECTION_NAME,
+                metadata={"hnsw:space": "cosine", "embedding_identity": self.embedder.identity},
+            )
+            identity = (self.collection.metadata or {}).get("embedding_identity")
+            if identity and identity != self.embedder.identity:
+                raise RAGError(
+                    "The saved Chroma collection uses a different embedding configuration. "
+                    "Do not mix embeddings; configure the original model or use a new data/chroma directory "
+                    "and re-index all PDFs."
+                )
+        else:
+            self.client = None
+            self.collection = self._CollectionShim(self)
+            self._load()
+
+    def _load(self) -> None:
+        if self.meta_path.exists():
+            try:
+                meta = json.loads(self.meta_path.read_text(encoding="utf-8"))
+                saved_identity = meta.get("embedding_identity")
+                if saved_identity and saved_identity != self.embedder.identity:
+                    raise RAGError(
+                        "The saved Chroma collection uses a different embedding configuration. "
+                        "Do not mix embeddings; configure the original model or use a new data/chroma directory "
+                        "and re-index all PDFs."
+                    )
+            except RAGError:
+                raise
+            except Exception as exc:
+                logger.warning("Could not read vector store metadata: %s", exc)
+
+        if self.data_path.exists():
+            try:
+                payload = json.loads(self.data_path.read_text(encoding="utf-8"))
+                self.chunks = {item["chunk_id"]: item for item in payload.get("chunks", [])}
+            except Exception as exc:
+                logger.warning("Could not load vector store data: %s", exc)
+                self.chunks = {}
+
+    def _save(self) -> None:
+        try:
+            self.path.mkdir(parents=True, exist_ok=True)
+            meta_tmp = self.meta_path.with_suffix(".tmp")
+            meta_tmp.write_text(
+                json.dumps({"embedding_identity": self.embedder.identity}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            meta_tmp.replace(self.meta_path)
+
+            data_tmp = self.data_path.with_suffix(".tmp")
+            data_tmp.write_text(
+                json.dumps({"chunks": list(self.chunks.values())}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            data_tmp.replace(self.data_path)
+        except OSError as exc:
+            logger.warning("Vector store persistence skipped (filesystem may be read-only): %s", exc)
 
     def replace_document(self, document_id: str, chunks: list[dict[str, Any]]) -> None:
         vectors = self.embedder.embed_documents([chunk["content"] for chunk in chunks])
-        existing = self.collection.get(where={"document_id": document_id})
-        old_ids = set(existing.get("ids") or [])
-        new_ids = {chunk["chunk_id"] for chunk in chunks}
-        if chunks:
-            metadata = [
-                {
-                    "document_id": c["document_id"],
-                    "document_title": c["document_title"],
-                    "filename": c["filename"],
-                    "page_number": c["page_number"] or -1,
-                    "chunk_index": c["chunk_index"],
-                    "record_type": c.get("record_type", "narrative"),
-                    "entity": c.get("entity", ""),
-                }
-                for c in chunks
-            ]
-            self.collection.upsert(
-                ids=[c["chunk_id"] for c in chunks],
-                documents=[c["content"] for c in chunks],
-                metadatas=metadata,
-                embeddings=vectors,
-            )
-        obsolete = old_ids - new_ids
-        if obsolete:
-            self.collection.delete(ids=list(obsolete))
+        if self._use_chroma:
+            existing = self.collection.get(where={"document_id": document_id})
+            old_ids = set(existing.get("ids") or [])
+            new_ids = {chunk["chunk_id"] for chunk in chunks}
+            if chunks:
+                metadata = [
+                    {
+                        "document_id": c["document_id"],
+                        "document_title": c["document_title"],
+                        "filename": c["filename"],
+                        "page_number": c["page_number"] or -1,
+                        "chunk_index": c["chunk_index"],
+                        "record_type": c.get("record_type", "narrative"),
+                        "entity": c.get("entity", ""),
+                    }
+                    for c in chunks
+                ]
+                self.collection.upsert(
+                    ids=[c["chunk_id"] for c in chunks],
+                    documents=[c["content"] for c in chunks],
+                    metadatas=metadata,
+                    embeddings=vectors,
+                )
+            obsolete = old_ids - new_ids
+            if obsolete:
+                self.collection.delete(ids=list(obsolete))
+            return
+
+        self.chunks = {
+            cid: item for cid, item in self.chunks.items()
+            if item.get("document_id") != document_id
+        }
+        for chunk, vector in zip(chunks, vectors):
+            self.chunks[chunk["chunk_id"]] = {
+                "chunk_id": chunk["chunk_id"],
+                "content": chunk["content"],
+                "document_id": chunk["document_id"],
+                "document_title": chunk["document_title"],
+                "filename": chunk["filename"],
+                "page_number": chunk["page_number"] if (chunk["page_number"] and chunk["page_number"] > 0) else None,
+                "chunk_index": chunk["chunk_index"],
+                "record_type": chunk.get("record_type", "narrative"),
+                "entity": chunk.get("entity", ""),
+                "vector": vector,
+            }
+        self._save()
 
     def delete_document(self, document_id: str) -> None:
-        records = self.collection.get(where={"document_id": document_id})
-        if records.get("ids"):
-            self.collection.delete(ids=records["ids"])
+        if self._use_chroma:
+            records = self.collection.get(where={"document_id": document_id})
+            if records.get("ids"):
+                self.collection.delete(ids=records["ids"])
+            return
+
+        self.chunks = {
+            cid: item for cid, item in self.chunks.items()
+            if item.get("document_id") != document_id
+        }
+        self._save()
 
     def search(self, query: str, limit: int) -> list[dict[str, Any]]:
-        count = self.collection.count()
+        count = self.count()
         if count == 0:
             return []
-        result = self.collection.query(
-            query_embeddings=[self.embedder.embed_query(query)],
-            n_results=min(limit, count),
-            include=["documents", "metadatas", "distances"],
-        )
+
+        if self._use_chroma:
+            result = self.collection.query(
+                query_embeddings=[self.embedder.embed_query(query)],
+                n_results=min(limit, count),
+                include=["documents", "metadatas", "distances"],
+            )
+            rows = []
+            for chunk_id, text, meta, distance in zip(
+                result["ids"][0], result["documents"][0], result["metadatas"][0], result["distances"][0]
+            ):
+                rows.append(
+                    {
+                        "chunk_id": chunk_id,
+                        "content": text,
+                        "document_id": meta["document_id"],
+                        "document_title": meta["document_title"],
+                        "filename": meta["filename"],
+                        "page_number": meta["page_number"] if meta["page_number"] > 0 else None,
+                        "record_type": meta.get("record_type", "narrative"),
+                        "entity": meta.get("entity", ""),
+                        "dense_score": max(0.0, 1.0 - float(distance)),
+                    }
+                )
+            return rows
+
+        import numpy as np
+        query_vec = np.array(self.embedder.embed_query(query), dtype=np.float32)
+        q_norm = float(np.linalg.norm(query_vec))
+        if q_norm > 0:
+            query_vec /= q_norm
+
+        items = list(self.chunks.values())
+        if not items:
+            return []
+
+        matrix = np.array([item["vector"] for item in items], dtype=np.float32)
+        norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        matrix_normed = matrix / norms
+
+        similarities = np.dot(matrix_normed, query_vec)
+        top_k = min(limit, len(items))
+        top_indices = np.argsort(similarities)[::-1][:top_k]
+
         rows = []
-        for chunk_id, text, meta, distance in zip(
-            result["ids"][0], result["documents"][0], result["metadatas"][0], result["distances"][0]
-        ):
+        for idx in top_indices:
+            item = items[idx]
+            sim = float(similarities[idx])
+            dist = max(0.0, 1.0 - sim)
             rows.append(
                 {
-                    "chunk_id": chunk_id,
-                    "content": text,
-                    "document_id": meta["document_id"],
-                    "document_title": meta["document_title"],
-                    "filename": meta["filename"],
-                    "page_number": meta["page_number"] if meta["page_number"] > 0 else None,
-                    "record_type": meta.get("record_type", "narrative"),
-                    "entity": meta.get("entity", ""),
-                    "dense_score": max(0.0, 1.0 - float(distance)),
+                    "chunk_id": item["chunk_id"],
+                    "content": item["content"],
+                    "document_id": item["document_id"],
+                    "document_title": item["document_title"],
+                    "filename": item["filename"],
+                    "page_number": item["page_number"],
+                    "record_type": item.get("record_type", "narrative"),
+                    "entity": item.get("entity", ""),
+                    "dense_score": max(0.0, 1.0 - dist),
                 }
             )
         return rows
 
     def count(self) -> int:
-        return self.collection.count()
+        if self._use_chroma:
+            return self.collection.count()
+        return len(self.chunks)
 
 
 class LexicalIndex:

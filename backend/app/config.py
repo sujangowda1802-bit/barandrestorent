@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     top_k_dense: int = 8
     top_k_lexical: int = 8
     top_k_final: int = 5
+    use_chromadb: bool = False
 
     @property
     def data_dir(self) -> Path:

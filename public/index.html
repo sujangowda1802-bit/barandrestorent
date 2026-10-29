@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A document-grounded restaurant assistant demo for Green Fork Bistro.">
+  <title>Bar &amp; Restaurant Assistant</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/">Green Fork <span>Assistant</span></a>
+      <p class="side-label">Knowledge base</p>
+      <div id="status" class="status-card">Checking index…</div>
+      <button id="reindex" class="secondary-button" type="button">Re-index PDFs</button>
+      <p class="side-label">Recent chats</p>
+      <div id="history" class="history-list"><p class="muted">No conversations yet.</p></div>
+      <p class="disclaimer">Fictional capstone demonstration. No bookings, payments, orders, or delivery tracking.</p>
+    </aside>
+
+    <section class="chat-layout">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">GREEN FORK BISTRO · DOCUMENT Q&amp;A</p>
+          <h1>Bar &amp; Restaurant Assistant</h1>
+          <p class="subtitle">Answers are based on the provided restaurant documents. Sources are shown with each answer.</p>
+        </div>
+        <span id="model-status" class="model-badge">Local retrieval</span>
+      </header>
+
+      <section id="messages" class="messages" aria-live="polite">
+        <div class="welcome-card" id="welcome">
+          <h2>How can I help?</h2>
+          <p>Ask about the sample menu, ingredients, allergens, hours, or restaurant policies.</p>
+          <div class="examples">
+            <button type="button" class="example">What vegetarian main courses cost less than ₹250?</button>
+            <button type="button" class="example">What ingredients are listed for Paneer Butter Masala?</button>
+            <button type="button" class="example">Which listed dishes contain wheat?</button>
+            <button type="button" class="example">What are the weekend opening hours?</button>
+            <button type="button" class="example">Does the sample restaurant accept UPI?</button>
+            <button type="button" class="example">Can you confirm a table for 7 PM tonight?</button>
+            <button type="button" class="example">What is the delivery fee?</button>
+            <button type="button" class="example">What is the price of an unlisted dish?</button>
+          </div>
+        </div>
+      </section>
+
+      <form id="chat-form" class="composer">
+        <label class="sr-only" for="question">Ask a question</label>
+        <textarea id="question" rows="1" maxlength="2000" placeholder="Ask about the menu, ingredients, opening hours, or policies…" required></textarea>
+        <button id="send" type="submit">Send</button>
+        <p class="composer-note">All restaurant details are fictional sample data. Allergy information is not a safety guarantee.</p>
+      </form>
+    </section>
+  </main>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

@@ -4,10 +4,10 @@ import uuid
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import PROJECT_ROOT, settings
@@ -47,6 +47,7 @@ app = FastAPI(title="Bar & Restaurant Assistant", version="1.0.0", lifespan=life
 
 
 @app.get("/api/health", response_model=HealthResponse)
+@app.get("/health", response_model=HealthResponse, include_in_schema=False)
 def health() -> HealthResponse:
     documents = list(document_manager.documents.values())
     return HealthResponse(
@@ -61,6 +62,7 @@ def health() -> HealthResponse:
 
 
 @app.get("/api/documents", response_model=DocumentListResponse)
+@app.get("/documents", response_model=DocumentListResponse, include_in_schema=False)
 def list_documents() -> DocumentListResponse:
     items = [
         DocumentInfo(
@@ -81,6 +83,7 @@ def list_documents() -> DocumentListResponse:
 
 
 @app.post("/api/chat", response_model=ChatResponse)
+@app.post("/chat", response_model=ChatResponse, include_in_schema=False)
 def chat(payload: ChatRequest) -> ChatResponse:
     query = payload.message.strip()
     if not query:
@@ -143,6 +146,7 @@ def chat(payload: ChatRequest) -> ChatResponse:
 
 
 @app.get("/api/chat/conversations")
+@app.get("/chat/conversations", include_in_schema=False)
 def list_conversations() -> list[dict[str, str | int]]:
     return [
         {
@@ -158,6 +162,7 @@ def list_conversations() -> list[dict[str, str | int]]:
 
 
 @app.get("/api/chat/conversations/{conversation_id}")
+@app.get("/chat/conversations/{conversation_id}", include_in_schema=False)
 def get_conversation(conversation_id: str) -> list[dict[str, Any]]:
     if conversation_id not in conversations:
         raise HTTPException(status_code=404, detail="Conversation not found.")
@@ -165,6 +170,7 @@ def get_conversation(conversation_id: str) -> list[dict[str, Any]]:
 
 
 @app.post("/api/documents/upload")
+@app.post("/documents/upload", include_in_schema=False)
 async def upload_document(request: Request, file: UploadFile = File(...)) -> dict:
     _require_loopback(request)
     original_name = Path(file.filename or "").name
@@ -204,6 +210,7 @@ async def upload_document(request: Request, file: UploadFile = File(...)) -> dic
 
 
 @app.post("/api/admin/reindex")
+@app.post("/admin/reindex", include_in_schema=False)
 def reindex(request: Request) -> dict[str, int]:
     _require_loopback(request)
     try:
@@ -218,10 +225,36 @@ def _require_loopback(request: Request) -> None:
         raise HTTPException(status_code=403, detail="This local admin action is restricted to loopback clients.")
 
 
-frontend_dir = PROJECT_ROOT / "frontend"
-if frontend_dir.exists():
+def _find_frontend_dir() -> Optional[Path]:
+    candidates = [
+        PROJECT_ROOT / "public",
+        PROJECT_ROOT / "frontend",
+        Path(__file__).resolve().parents[2] / "public",
+        Path(__file__).resolve().parents[2] / "frontend",
+        Path("public"),
+        Path("frontend"),
+    ]
+    for candidate in candidates:
+        if candidate.exists() and (candidate / "index.html").exists():
+            return candidate
+    return None
+
+
+frontend_dir = _find_frontend_dir()
+if frontend_dir:
     app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
 
-    @app.get("/", include_in_schema=False)
-    def root() -> FileResponse:
-        return FileResponse(frontend_dir / "index.html")
+
+@app.get("/", include_in_schema=False)
+@app.get("/index.html", include_in_schema=False)
+@app.get("/api/index.py", include_in_schema=False)
+@app.get("/api/index", include_in_schema=False)
+def root():
+    fdir = _find_frontend_dir()
+    if fdir and (fdir / "index.html").exists():
+        return FileResponse(fdir / "index.html")
+    for fallback in [Path("public/index.html"), Path("frontend/index.html"), PROJECT_ROOT / "frontend" / "index.html"]:
+        if fallback.exists():
+            return FileResponse(fallback)
+    return HTMLResponse("<!doctype html><html><body><h1>Bar & Restaurant Assistant</h1><p>Frontend loading...</p></body></html>")
+
