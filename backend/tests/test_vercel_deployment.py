@@ -31,10 +31,48 @@ def test_root_serves_frontend_html(client):
 
 
 def test_root_aliases_serve_frontend(client):
-    for path in ["/index.html", "/api/index.py", "/api/index"]:
+    for path in ["/", "/index.html"]:
         response = client.get(path)
         assert response.status_code == 200
         assert "text/html" in response.headers.get("content-type", "")
+
+
+def test_rewritten_post_chat_returns_200_not_405(client):
+    # Verifies that when Vercel rewrites POST /api/chat to /api/index.py,
+    # the middleware correctly restores the path so it does not return 405 Method Not Allowed
+    response = client.post(
+        "/api/index.py",
+        headers={"x-matched-path": "/api/chat"},
+        json={"message": "What vegetarian dishes cost less than 250?"},
+    )
+    assert response.status_code == 200
+    assert response.headers.get("content-type", "").startswith("application/json")
+    data = response.json()
+    assert "answer" in data
+    assert "citations" in data
+
+
+def test_rewritten_get_health_returns_json_not_html(client):
+    # Verifies that when Vercel rewrites GET /api/health to /api/index.py,
+    # it returns the HealthResponse JSON, NOT index.html!
+    response = client.get("/api/index.py", headers={"x-matched-path": "/api/health"})
+    assert response.status_code == 200
+    assert response.headers.get("content-type", "").startswith("application/json")
+    data = response.json()
+    assert data["status"] == "healthy"
+    assert data["documents"] == 3
+    assert data["chunks"] > 0
+
+
+def test_rewritten_get_conversations(client):
+    response = client.get("/api/index.py", headers={"x-matched-path": "/api/chat/conversations"})
+    assert response.status_code == 200
+    assert isinstance(response.json(), list)
+
+
+def test_root_main_entrypoint_matches_app():
+    import main as root_main
+    assert root_main.app is app
 
 
 def test_api_health_endpoint(client):

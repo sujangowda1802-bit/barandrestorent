@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.config import PROJECT_ROOT, settings
@@ -46,9 +46,45 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="Bar & Restaurant Assistant", version="1.0.0", lifespan=lifespan)
 
 
+@app.middleware("http")
+async def vercel_path_correction(request: Request, call_next):
+    # When Vercel rewrites requests to /api/index.py, Vercel sets the ASGI path
+    # to /api/index.py and provides the original requested path in headers:
+    # 'x-matched-path', 'x-forwarded-uri', or 'x-real-path'.
+    scope = request.scope
+    path = scope.get("path", "")
+    if path in ("/api/index.py", "/api/index", "/index.py", "/api", ""):
+        matched = (
+            request.headers.get("x-matched-path")
+            or request.headers.get("x-forwarded-uri")
+            or request.headers.get("x-real-path")
+            or request.headers.get("x-original-uri")
+            or request.query_params.get("path")
+        )
+        if matched and matched not in ("/api/index.py", "/api/index", "/index.py"):
+            target_path = matched.split("?")[0]
+            if not target_path.startswith("/"):
+                target_path = "/" + target_path
+            scope["path"] = target_path
+            scope["raw_path"] = target_path.encode("utf-8")
+        elif not matched or matched in ("/", "/index.html"):
+            scope["path"] = "/"
+            scope["raw_path"] = b"/"
+    return await call_next(request)
+
+
+def ensure_documents_synced() -> None:
+    if not document_manager.documents or vector_store.count() == 0:
+        try:
+            document_manager.sync_managed_directory(settings.documents_dir)
+        except Exception:
+            logger.exception("Could not synchronize document directory.")
+
+
 @app.get("/api/health", response_model=HealthResponse)
 @app.get("/health", response_model=HealthResponse, include_in_schema=False)
 def health() -> HealthResponse:
+    ensure_documents_synced()
     documents = list(document_manager.documents.values())
     return HealthResponse(
         status="healthy",
@@ -85,6 +121,7 @@ def list_documents() -> DocumentListResponse:
 @app.post("/api/chat", response_model=ChatResponse)
 @app.post("/chat", response_model=ChatResponse, include_in_schema=False)
 def chat(payload: ChatRequest) -> ChatResponse:
+    ensure_documents_synced()
     query = payload.message.strip()
     if not query:
         raise HTTPException(status_code=422, detail="Enter a question.")
@@ -245,10 +282,13 @@ if frontend_dir:
     app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
 
 
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return Response(status_code=204)
+
+
 @app.get("/", include_in_schema=False)
 @app.get("/index.html", include_in_schema=False)
-@app.get("/api/index.py", include_in_schema=False)
-@app.get("/api/index", include_in_schema=False)
 def root():
     fdir = _find_frontend_dir()
     if fdir and (fdir / "index.html").exists():
