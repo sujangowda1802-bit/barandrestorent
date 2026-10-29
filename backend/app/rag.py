@@ -588,7 +588,10 @@ class DocumentManager:
         return document
 
     def sync_managed_directory(self, directory: Path, *, force: bool = False) -> dict[str, int]:
-        directory.mkdir(parents=True, exist_ok=True)
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
         files = sorted(
             path for path in directory.iterdir()
             if path.is_file() and path.suffix.casefold() in {".pdf", ".md", ".markdown", ".txt"}

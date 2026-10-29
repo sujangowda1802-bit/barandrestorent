@@ -28,10 +28,23 @@ class Settings(BaseSettings):
 
     @property
     def data_dir(self) -> Path:
+        import os
+        custom = os.environ.get("DATA_DIR")
+        if custom:
+            return Path(custom)
+        if os.environ.get("VERCEL"):
+            return Path("/tmp/data")
         return PROJECT_ROOT / "data"
 
     @property
     def documents_dir(self) -> Path:
+        import os
+        custom = os.environ.get("DOCUMENTS_DIR")
+        if custom:
+            return Path(custom)
+        bundled = PROJECT_ROOT / "data" / "documents"
+        if bundled.exists():
+            return bundled
         return self.data_dir / "documents"
 
     @property
